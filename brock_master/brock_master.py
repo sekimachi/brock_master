@@ -769,13 +769,9 @@ class BrockMasterNode(Node):
     # ========================================================
 
     def _publish_info(self, info_lines):
-        """検出情報をbrocks_infoへ送信する。"""
-
         if not info_lines:
             return
-
         info_msg = String()
-
         info_msg.data = "\n".join(
             info_lines
         )
@@ -808,10 +804,7 @@ class BrockMasterNode(Node):
     # ========================================================
 
     def destroy_node(self):
-        """ノード終了時にカメラを解放する。"""
-
         self.webcam.release()
-
         super().destroy_node()
 
 
