@@ -52,9 +52,6 @@ WEBCAM_HEIGHT = 1080
 
 # ============================================================
 # 配信用解像度
-#
-# 推論・距離計算は1920x1080のまま行い、
-# publishするImageトピックだけ縮小する
 # ============================================================
 
 PUBLISH_WIDTH = 1280
@@ -111,6 +108,13 @@ BBOX_OVERLAP_THRESHOLD = 0.70
 
 
 # ============================================================
+# FPS計測設定
+# ============================================================
+
+FPS_HISTORY_SIZE = 10
+
+
+# ============================================================
 # 描画設定
 # ============================================================
 
@@ -120,6 +124,10 @@ BOX_COLOR = (0, 165, 255)
 # 目標X軸
 TARGET_X_COLOR = (0, 255, 0)
 TARGET_X_THICKNESS = 2
+
+# FPS表示
+FPS_COLOR = (255, 255, 255)
+FPS_BACKGROUND_COLOR = (0, 0, 0)
 
 
 # ============================================================
@@ -168,6 +176,56 @@ COLOR_TO_MODEL_INDEX = {
     name.split("_")[0].lower(): index
     for index, name in enumerate(MODEL_NAMES)
 }
+
+
+# ============================================================
+# FPS計測クラス
+# ============================================================
+
+class FPSCounter:
+
+    def __init__(self, history_size=10):
+
+        self.timestamps = deque(
+            maxlen=history_size
+        )
+
+        self.fps = 0.0
+
+        self.lock = threading.Lock()
+
+
+    def update(self):
+
+        now = time.perf_counter()
+
+        with self.lock:
+
+            self.timestamps.append(now)
+
+            if len(self.timestamps) < 2:
+                self.fps = 0.0
+                return self.fps
+
+            elapsed = (
+                self.timestamps[-1]
+                - self.timestamps[0]
+            )
+
+            if elapsed > 0:
+
+                self.fps = (
+                    (len(self.timestamps) - 1)
+                    / elapsed
+                )
+
+        return self.fps
+
+
+    def get_fps(self):
+
+        with self.lock:
+            return self.fps
 
 
 # ============================================================
@@ -222,22 +280,6 @@ def is_aspect_ratio_reliable(
 # BBOXの重なり率計算
 #
 # 「重なっている面積 ÷ 小さい方のBBOX面積」
-#
-# 例：
-#
-# BBOX A
-# ┌───────────────┐
-# │               │
-# │    ┌──────────┼──────┐
-# │    │          │      │
-# │    │    B     │      │
-# │    │          │      │
-# │    └──────────┼──────┘
-# │               │
-# └───────────────┘
-#
-# BがAにほぼ完全に含まれていれば、
-# 重なり率はほぼ100%になる
 # ============================================================
 
 def calculate_overlap_ratio(box1, box2):
@@ -279,7 +321,7 @@ def calculate_overlap_ratio(box1, box2):
 
 
     # ----------------------------------------------------
-    # 重なり領域のサイズ
+    # 重なり領域
     # ----------------------------------------------------
 
     overlap_width = (
@@ -289,11 +331,6 @@ def calculate_overlap_ratio(box1, box2):
     overlap_height = (
         overlap_y2 - overlap_y1
     )
-
-
-    # ----------------------------------------------------
-    # 重なり面積
-    # ----------------------------------------------------
 
     overlap_area = (
         overlap_width
@@ -340,7 +377,6 @@ def calculate_overlap_ratio(box1, box2):
         area2,
     )
 
-
     if smaller_area <= 0:
         return 0.0
 
@@ -349,12 +385,10 @@ def calculate_overlap_ratio(box1, box2):
     # 重なり率
     # ----------------------------------------------------
 
-    overlap_ratio = (
+    return (
         overlap_area
         / smaller_area
     )
-
-    return overlap_ratio
 
 
 # ============================================================
@@ -362,22 +396,16 @@ def calculate_overlap_ratio(box1, box2):
 #
 # 70%以上重なっているBBOXがあれば、
 # 信頼度の低い方を削除する。
-#
-# 信頼度が高いBBOXを優先して残す。
 # ============================================================
 
 def remove_overlapping_boxes(box_data_list):
-
-    # ----------------------------------------------------
-    # BBOXが0個または1個なら何もしない
-    # ----------------------------------------------------
 
     if len(box_data_list) <= 1:
         return box_data_list
 
 
     # ----------------------------------------------------
-    # Confidenceの高い順に並べる
+    # Confidenceの高い順
     # ----------------------------------------------------
 
     sorted_boxes = sorted(
@@ -386,10 +414,6 @@ def remove_overlapping_boxes(box_data_list):
         reverse=True,
     )
 
-
-    # ----------------------------------------------------
-    # 最終的に残すBBOX
-    # ----------------------------------------------------
 
     kept_boxes = []
 
@@ -404,7 +428,7 @@ def remove_overlapping_boxes(box_data_list):
 
 
         # ------------------------------------------------
-        # すでに残っているBBOXと比較
+        # 既に残っているBBOXと比較
         # ------------------------------------------------
 
         for kept_box in kept_boxes:
@@ -529,6 +553,19 @@ class BrockMasterNode(Node):
 
 
         # ====================================================
+        # FPS計測
+        # ====================================================
+
+        self.image_fps_counter = FPSCounter(
+            FPS_HISTORY_SIZE
+        )
+
+        self.yolo_fps_counter = FPSCounter(
+            FPS_HISTORY_SIZE
+        )
+
+
+        # ====================================================
         # モデル
         # ====================================================
 
@@ -604,7 +641,6 @@ class BrockMasterNode(Node):
             )
 
 
-        # 最初に使用するモデル
         self.active_model_index = 0
 
         self.get_logger().info(
@@ -820,7 +856,6 @@ class BrockMasterNode(Node):
         )
 
 
-        # Confidence更新
         self.conf_thres = confidence
 
 
@@ -840,13 +875,11 @@ class BrockMasterNode(Node):
         reliable,
     ):
 
-        # 現在の距離を計算
         distance = estimate_distance_from_height(
             pixel_height
         )
 
 
-        # 信頼できる距離だけ履歴に追加
         if reliable and distance > 0:
 
             self.distance_history.append(
@@ -854,13 +887,11 @@ class BrockMasterNode(Node):
             )
 
 
-        # 履歴がなければ現在値を返す
         if not self.distance_history:
 
             return distance
 
 
-        # 履歴の中央値を使用
         sorted_history = sorted(
             self.distance_history
         )
@@ -875,13 +906,13 @@ class BrockMasterNode(Node):
     # ========================================================
     # カメラタイマー
     #
-    # YOLOとは完全に分離
+    # カメラ取得と映像配信
     # ========================================================
 
     def on_camera_timer(self):
 
         # ----------------------------------------------------
-        # カメラ画像取得（1920x1080）
+        # カメラ画像取得
         # ----------------------------------------------------
 
         ret, frame = self.webcam.read()
@@ -891,7 +922,18 @@ class BrockMasterNode(Node):
 
 
         # ----------------------------------------------------
+        # 実際の映像FPSを更新
+        # ----------------------------------------------------
+
+        image_fps = (
+            self.image_fps_counter.update()
+        )
+
+
+        # ----------------------------------------------------
         # 最新フレームを保存
+        #
+        # YOLOはこの最新フレームを使用
         # ----------------------------------------------------
 
         with self.data_lock:
@@ -921,7 +963,7 @@ class BrockMasterNode(Node):
 
 
         # ----------------------------------------------------
-        # BBOX + 緑線描画
+        # BBOX描画
         # ----------------------------------------------------
 
         self._draw_boxes(
@@ -932,12 +974,28 @@ class BrockMasterNode(Node):
 
 
         # ----------------------------------------------------
+        # FPS表示
+        #
+        # 右上に表示
+        # ----------------------------------------------------
+
+        self._draw_fps(
+            frame,
+            image_fps,
+            self.yolo_fps_counter.get_fps(),
+        )
+
+
+        # ----------------------------------------------------
         # 配信用に縮小
         # ----------------------------------------------------
 
         publish_frame = cv2.resize(
             frame,
-            (PUBLISH_WIDTH, PUBLISH_HEIGHT),
+            (
+                PUBLISH_WIDTH,
+                PUBLISH_HEIGHT,
+            ),
             interpolation=cv2.INTER_AREA,
         )
 
@@ -960,7 +1018,7 @@ class BrockMasterNode(Node):
     def on_yolo_timer(self):
 
         # ----------------------------------------------------
-        # 最新フレームを取得
+        # 最新フレーム取得
         # ----------------------------------------------------
 
         with self.data_lock:
@@ -987,11 +1045,17 @@ class BrockMasterNode(Node):
         )
 
 
+        # ----------------------------------------------------
+        # 実際のYOLO FPSを更新
+        # ----------------------------------------------------
+
+        yolo_fps = (
+            self.yolo_fps_counter.update()
+        )
+
+
         # ====================================================
         # BBOX重複除去
-        #
-        # 70%以上重なっている場合、
-        # 信頼度の低い方を削除する
         # ====================================================
 
         before_count = len(
@@ -1079,7 +1143,185 @@ class BrockMasterNode(Node):
 
         self.get_logger().debug(
             f"YOLO inference: "
-            f"{inference_time * 1000:.1f} ms"
+            f"{inference_time * 1000:.1f} ms, "
+            f"YOLO FPS: {yolo_fps:.1f}"
+        )
+
+
+    # ========================================================
+    # FPS描画
+    #
+    # 画面右上に
+    #
+    # IMAGE FPS : xx.x
+    # YOLO FPS  : xx.x
+    #
+    # を表示
+    # ========================================================
+
+    def _draw_fps(
+        self,
+        frame,
+        image_fps,
+        yolo_fps,
+    ):
+
+        # ----------------------------------------------------
+        # 表示文字
+        # ----------------------------------------------------
+
+        image_fps_text = (
+            f"IMAGE FPS : {image_fps:.1f}"
+        )
+
+        yolo_fps_text = (
+            f"YOLO FPS  : {yolo_fps:.1f}"
+        )
+
+
+        # ----------------------------------------------------
+        # フォント設定
+        # ----------------------------------------------------
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+
+        font_scale = 0.8
+
+        thickness = 2
+
+
+        # ----------------------------------------------------
+        # 文字サイズ取得
+        # ----------------------------------------------------
+
+        (image_text_width, image_text_height), _ = (
+            cv2.getTextSize(
+                image_fps_text,
+                font,
+                font_scale,
+                thickness,
+            )
+        )
+
+        (yolo_text_width, yolo_text_height), _ = (
+            cv2.getTextSize(
+                yolo_fps_text,
+                font,
+                font_scale,
+                thickness,
+            )
+        )
+
+
+        # ----------------------------------------------------
+        # 最大幅
+        # ----------------------------------------------------
+
+        text_width = max(
+            image_text_width,
+            yolo_text_width,
+        )
+
+
+        # ----------------------------------------------------
+        # 右上の位置
+        # ----------------------------------------------------
+
+        margin_right = 20
+
+        margin_top = 20
+
+        x = (
+            frame.shape[1]
+            - text_width
+            - margin_right
+        )
+
+        y1 = (
+            margin_top
+            + image_text_height
+        )
+
+        y2 = (
+            y1
+            + yolo_text_height
+            + 15
+        )
+
+
+        # ----------------------------------------------------
+        # 背景
+        #
+        # 文字を見やすくするため黒背景を描画
+        # ----------------------------------------------------
+
+        background_x1 = x - 10
+
+        background_y1 = (
+            margin_top - 10
+        )
+
+        background_x2 = (
+            frame.shape[1]
+            - margin_right
+            + 10
+        )
+
+        background_y2 = (
+            y2 + 10
+        )
+
+
+        cv2.rectangle(
+            frame,
+            (
+                background_x1,
+                background_y1,
+            ),
+            (
+                background_x2,
+                background_y2,
+            ),
+            FPS_BACKGROUND_COLOR,
+            -1,
+        )
+
+
+        # ----------------------------------------------------
+        # IMAGE FPS
+        # ----------------------------------------------------
+
+        cv2.putText(
+            frame,
+            image_fps_text,
+            (
+                x,
+                y1,
+            ),
+            font,
+            font_scale,
+            FPS_COLOR,
+            thickness,
+            cv2.LINE_AA,
+        )
+
+
+        # ----------------------------------------------------
+        # YOLO FPS
+        # ----------------------------------------------------
+
+        cv2.putText(
+            frame,
+            yolo_fps_text,
+            (
+                x,
+                y2,
+            ),
+            font,
+            font_scale,
+            FPS_COLOR,
+            thickness,
+            cv2.LINE_AA,
         )
 
 
@@ -1219,8 +1461,6 @@ class BrockMasterNode(Node):
 
     # ========================================================
     # BBOX描画
-    #
-    # YOLO推論とは分離
     # ========================================================
 
     def _draw_boxes(
