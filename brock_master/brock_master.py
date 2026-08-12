@@ -42,12 +42,23 @@ CONF_THRES = 0.01
 
 
 # ============================================================
-# Webカメラ設定
+# Webカメラ設定（推論用の解像度）
 # ============================================================
 
 WEBCAM_INDEX = 4
-WEBCAM_WIDTH = 1280
-WEBCAM_HEIGHT = 720
+WEBCAM_WIDTH = 1920
+WEBCAM_HEIGHT = 1080
+
+
+# ============================================================
+# 配信用解像度
+#
+# 推論・距離計算は1920x1080のまま行い、
+# publishするImageトピックだけ縮小する
+# ============================================================
+
+PUBLISH_WIDTH = 1280
+PUBLISH_HEIGHT = 720
 
 
 # ============================================================
@@ -59,8 +70,6 @@ IMAGE_FPS = 30.0
 
 # ============================================================
 # YOLO推論FPS
-#
-# 例えば10FPSなら約0.1秒に1回YOLOを実行
 # ============================================================
 
 YOLO_FPS = 10.0
@@ -73,7 +82,7 @@ YOLO_FPS = 10.0
 BOX_REAL_WIDTH_M = 0.22
 BOX_REAL_HEIGHT_M = 0.30
 
-WEBCAM_FOCAL_LENGTH_PX = 791.7
+WEBCAM_FOCAL_LENGTH_PX = 791.7 * 1.5
 
 DISTANCE_HISTORY_SIZE = 4
 
@@ -90,6 +99,18 @@ ASPECT_RATIO_TOLERANCE = 0.4
 
 
 # ============================================================
+# BBOX重複判定
+#
+# 重なり面積 / 小さい方のBBOX面積
+#
+# 70%以上重なった場合、
+# 信頼度の低い方を削除する
+# ============================================================
+
+BBOX_OVERLAP_THRESHOLD = 0.70
+
+
+# ============================================================
 # 描画設定
 # ============================================================
 
@@ -97,9 +118,7 @@ ASPECT_RATIO_TOLERANCE = 0.4
 BOX_COLOR = (0, 165, 255)
 
 # 目標X軸
-# BGRで (0, 255, 0) = 緑
 TARGET_X_COLOR = (0, 255, 0)
-
 TARGET_X_THICKNESS = 2
 
 
@@ -200,6 +219,233 @@ def is_aspect_ratio_reliable(
 
 
 # ============================================================
+# BBOXの重なり率計算
+#
+# 「重なっている面積 ÷ 小さい方のBBOX面積」
+#
+# 例：
+#
+# BBOX A
+# ┌───────────────┐
+# │               │
+# │    ┌──────────┼──────┐
+# │    │          │      │
+# │    │    B     │      │
+# │    │          │      │
+# │    └──────────┼──────┘
+# │               │
+# └───────────────┘
+#
+# BがAにほぼ完全に含まれていれば、
+# 重なり率はほぼ100%になる
+# ============================================================
+
+def calculate_overlap_ratio(box1, box2):
+
+    # ----------------------------------------------------
+    # 交差領域の座標
+    # ----------------------------------------------------
+
+    overlap_x1 = max(
+        box1["x1"],
+        box2["x1"],
+    )
+
+    overlap_y1 = max(
+        box1["y1"],
+        box2["y1"],
+    )
+
+    overlap_x2 = min(
+        box1["x2"],
+        box2["x2"],
+    )
+
+    overlap_y2 = min(
+        box1["y2"],
+        box2["y2"],
+    )
+
+
+    # ----------------------------------------------------
+    # 重なっていない場合
+    # ----------------------------------------------------
+
+    if (
+        overlap_x2 <= overlap_x1
+        or overlap_y2 <= overlap_y1
+    ):
+        return 0.0
+
+
+    # ----------------------------------------------------
+    # 重なり領域のサイズ
+    # ----------------------------------------------------
+
+    overlap_width = (
+        overlap_x2 - overlap_x1
+    )
+
+    overlap_height = (
+        overlap_y2 - overlap_y1
+    )
+
+
+    # ----------------------------------------------------
+    # 重なり面積
+    # ----------------------------------------------------
+
+    overlap_area = (
+        overlap_width
+        * overlap_height
+    )
+
+
+    # ----------------------------------------------------
+    # BBOX1の面積
+    # ----------------------------------------------------
+
+    width1 = (
+        box1["x2"] - box1["x1"]
+    )
+
+    height1 = (
+        box1["y2"] - box1["y1"]
+    )
+
+    area1 = width1 * height1
+
+
+    # ----------------------------------------------------
+    # BBOX2の面積
+    # ----------------------------------------------------
+
+    width2 = (
+        box2["x2"] - box2["x1"]
+    )
+
+    height2 = (
+        box2["y2"] - box2["y1"]
+    )
+
+    area2 = width2 * height2
+
+
+    # ----------------------------------------------------
+    # 小さい方の面積
+    # ----------------------------------------------------
+
+    smaller_area = min(
+        area1,
+        area2,
+    )
+
+
+    if smaller_area <= 0:
+        return 0.0
+
+
+    # ----------------------------------------------------
+    # 重なり率
+    # ----------------------------------------------------
+
+    overlap_ratio = (
+        overlap_area
+        / smaller_area
+    )
+
+    return overlap_ratio
+
+
+# ============================================================
+# BBOX重複除去
+#
+# 70%以上重なっているBBOXがあれば、
+# 信頼度の低い方を削除する。
+#
+# 信頼度が高いBBOXを優先して残す。
+# ============================================================
+
+def remove_overlapping_boxes(box_data_list):
+
+    # ----------------------------------------------------
+    # BBOXが0個または1個なら何もしない
+    # ----------------------------------------------------
+
+    if len(box_data_list) <= 1:
+        return box_data_list
+
+
+    # ----------------------------------------------------
+    # Confidenceの高い順に並べる
+    # ----------------------------------------------------
+
+    sorted_boxes = sorted(
+        box_data_list,
+        key=lambda box: box["confidence"],
+        reverse=True,
+    )
+
+
+    # ----------------------------------------------------
+    # 最終的に残すBBOX
+    # ----------------------------------------------------
+
+    kept_boxes = []
+
+
+    # ----------------------------------------------------
+    # 高信頼度のBBOXから確認
+    # ----------------------------------------------------
+
+    for current_box in sorted_boxes:
+
+        should_remove = False
+
+
+        # ------------------------------------------------
+        # すでに残っているBBOXと比較
+        # ------------------------------------------------
+
+        for kept_box in kept_boxes:
+
+            overlap_ratio = (
+                calculate_overlap_ratio(
+                    current_box,
+                    kept_box,
+                )
+            )
+
+
+            # --------------------------------------------
+            # 70%以上重なっている
+            # --------------------------------------------
+
+            if (
+                overlap_ratio
+                >= BBOX_OVERLAP_THRESHOLD
+            ):
+
+                should_remove = True
+
+                break
+
+
+        # ------------------------------------------------
+        # 重複していなければ残す
+        # ------------------------------------------------
+
+        if not should_remove:
+
+            kept_boxes.append(
+                current_box
+            )
+
+
+    return kept_boxes
+
+
+# ============================================================
 # 段数を割り振る
 # ============================================================
 
@@ -242,9 +488,6 @@ class BrockMasterNode(Node):
 
         # ====================================================
         # スレッド用Lock
-        #
-        # YOLO側と映像配信側が
-        # latest_box_dataを同時に触るため使用
         # ====================================================
 
         self.data_lock = threading.Lock()
@@ -323,13 +566,27 @@ class BrockMasterNode(Node):
             f"YOLO FPS target: {YOLO_FPS:.1f}"
         )
 
+        self.get_logger().info(
+            f"Inference resolution: "
+            f"{WEBCAM_WIDTH}x{WEBCAM_HEIGHT}"
+        )
+
+        self.get_logger().info(
+            f"Publish resolution: "
+            f"{PUBLISH_WIDTH}x{PUBLISH_HEIGHT}"
+        )
+
+        self.get_logger().info(
+            f"BBOX overlap threshold: "
+            f"{BBOX_OVERLAP_THRESHOLD * 100:.0f}%"
+        )
+
 
     # ========================================================
     # モデル読み込み
     # ========================================================
 
     def _load_models(self):
-        """YOLOモデルを読み込む。"""
 
         self.get_logger().info(
             f"Loading {len(MODEL_PATHS)} model(s)..."
@@ -361,7 +618,6 @@ class BrockMasterNode(Node):
     # ========================================================
 
     def _init_webcam(self):
-        """Webカメラと画像関連の初期化。"""
 
         self.webcam = LatestFrameReader(
             WEBCAM_INDEX,
@@ -385,8 +641,6 @@ class BrockMasterNode(Node):
     # ========================================================
 
     def _init_publishers_and_subscribers(self):
-        """ROSのPublisherとSubscriberを初期化する。"""
-
 
         # ----------------------------------------------------
         # Callback Group
@@ -475,8 +729,6 @@ class BrockMasterNode(Node):
 
         # ====================================================
         # カメラ取得タイマー
-        #
-        # ここではカメラ画像を取得するだけ
         # ====================================================
 
         self.camera_timer = self.create_timer(
@@ -490,8 +742,6 @@ class BrockMasterNode(Node):
 
         # ====================================================
         # YOLOタイマー
-        #
-        # カメラとは別速度で推論
         # ====================================================
 
         self.yolo_timer = self.create_timer(
@@ -517,10 +767,6 @@ class BrockMasterNode(Node):
     # ========================================================
 
     def on_brock_color(self, msg):
-        """
-        brock_colorを受信したときに、
-        使用するYOLOモデルを切り替える。
-        """
 
         color = msg.data.strip().lower()
 
@@ -563,10 +809,6 @@ class BrockMasterNode(Node):
     # ========================================================
 
     def on_brock_conf(self, msg):
-        """
-        brock_confを受信して、
-        YOLOのConfidence thresholdを変更する。
-        """
 
         confidence = float(msg.data)
 
@@ -639,7 +881,7 @@ class BrockMasterNode(Node):
     def on_camera_timer(self):
 
         # ----------------------------------------------------
-        # カメラ画像取得
+        # カメラ画像取得（1920x1080）
         # ----------------------------------------------------
 
         ret, frame = self.webcam.read()
@@ -690,10 +932,23 @@ class BrockMasterNode(Node):
 
 
         # ----------------------------------------------------
+        # 配信用に縮小
+        # ----------------------------------------------------
+
+        publish_frame = cv2.resize(
+            frame,
+            (PUBLISH_WIDTH, PUBLISH_HEIGHT),
+            interpolation=cv2.INTER_AREA,
+        )
+
+
+        # ----------------------------------------------------
         # Image publish
         # ----------------------------------------------------
 
-        self._publish_image(frame)
+        self._publish_image(
+            publish_frame
+        )
 
 
     # ========================================================
@@ -732,6 +987,47 @@ class BrockMasterNode(Node):
         )
 
 
+        # ====================================================
+        # BBOX重複除去
+        #
+        # 70%以上重なっている場合、
+        # 信頼度の低い方を削除する
+        # ====================================================
+
+        before_count = len(
+            box_data_list
+        )
+
+        box_data_list = (
+            remove_overlapping_boxes(
+                box_data_list
+            )
+        )
+
+        after_count = len(
+            box_data_list
+        )
+
+
+        # ----------------------------------------------------
+        # 重複除去ログ
+        # ----------------------------------------------------
+
+        if before_count != after_count:
+
+            removed_count = (
+                before_count
+                - after_count
+            )
+
+            self.get_logger().debug(
+                f"BBOX overlap filtering: "
+                f"{before_count} -> "
+                f"{after_count} "
+                f"({removed_count} removed)"
+            )
+
+
         # ----------------------------------------------------
         # 段数計算
         # ----------------------------------------------------
@@ -759,9 +1055,13 @@ class BrockMasterNode(Node):
 
         with self.data_lock:
 
-            self.latest_box_data = box_data_list
+            self.latest_box_data = (
+                box_data_list
+            )
 
-            self.latest_info_lines = info_lines
+            self.latest_info_lines = (
+                info_lines
+            )
 
 
         # ----------------------------------------------------
@@ -793,11 +1093,17 @@ class BrockMasterNode(Node):
         # 現在使用しているモデル
         # ----------------------------------------------------
 
-        model_index = self.active_model_index
+        model_index = (
+            self.active_model_index
+        )
 
-        model = self.models[model_index]
+        model = self.models[
+            model_index
+        ]
 
-        model_name = MODEL_NAMES[model_index]
+        model_name = MODEL_NAMES[
+            model_index
+        ]
 
 
         # ----------------------------------------------------
@@ -807,6 +1113,7 @@ class BrockMasterNode(Node):
         results = model(
             frame,
             conf=self.conf_thres,
+            imgsz=480,
             verbose=False,
         )
 
@@ -836,8 +1143,13 @@ class BrockMasterNode(Node):
                 # BBOXサイズ
                 # --------------------------------------------
 
-                pixel_width = x2 - x1
-                pixel_height = y2 - y1
+                pixel_width = (
+                    x2 - x1
+                )
+
+                pixel_height = (
+                    y2 - y1
+                )
 
 
                 # --------------------------------------------
@@ -922,7 +1234,9 @@ class BrockMasterNode(Node):
         # 目標X軸
         # ====================================================
 
-        target_x = frame.shape[1] // 2
+        target_x = (
+            frame.shape[1] // 2
+        )
 
 
         cv2.line(
@@ -1089,7 +1403,10 @@ class BrockMasterNode(Node):
     # brocks_info送信
     # ========================================================
 
-    def _publish_info(self, info_lines):
+    def _publish_info(
+        self,
+        info_lines,
+    ):
 
         if not info_lines:
             return
@@ -1113,7 +1430,10 @@ class BrockMasterNode(Node):
     # cv_bridge不要
     # ========================================================
 
-    def _publish_image(self, frame):
+    def _publish_image(
+        self,
+        frame,
+    ):
 
         # ----------------------------------------------------
         # ROS Imageメッセージ
@@ -1137,7 +1457,9 @@ class BrockMasterNode(Node):
         # サイズ
         # ----------------------------------------------------
 
-        height, width, channels = frame.shape
+        height, width, channels = (
+            frame.shape
+        )
 
         msg.height = height
         msg.width = width
@@ -1161,7 +1483,9 @@ class BrockMasterNode(Node):
         # 1行のバイト数
         # ----------------------------------------------------
 
-        msg.step = width * channels
+        msg.step = (
+            width * channels
+        )
 
 
         # ----------------------------------------------------
@@ -1175,7 +1499,9 @@ class BrockMasterNode(Node):
         # Publish
         # ----------------------------------------------------
 
-        self.publisher.publish(msg)
+        self.publisher.publish(
+            msg
+        )
 
 
     # ========================================================
@@ -1201,7 +1527,9 @@ def main(args=None):
     # ROS 2初期化
     # --------------------------------------------------------
 
-    rclpy.init(args=args)
+    rclpy.init(
+        args=args
+    )
 
 
     # --------------------------------------------------------
@@ -1219,7 +1547,9 @@ def main(args=None):
         num_threads=4
     )
 
-    executor.add_node(node)
+    executor.add_node(
+        node
+    )
 
 
     try:
