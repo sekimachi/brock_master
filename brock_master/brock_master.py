@@ -40,7 +40,7 @@ MODEL_FILENAMES = [
     "blue_brock.pt",
 ]
 
-CONF_THRES = 0.01
+CONF_THRES = 0.3
 
 
 # ============================================================
