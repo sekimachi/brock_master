@@ -4,11 +4,13 @@ import threading
 from collections import deque
 
 import cv2
+import numpy as np
 import rclpy
 
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
@@ -45,7 +47,10 @@ CONF_THRES = 0.01
 # Webカメラ設定（推論用の解像度）
 # ============================================================
 
-WEBCAM_INDEX = 4
+# /dev/videoNの番号はUSB抜き差しや起動順序でずれることがあるため、
+# by-id(デバイス名ベース)のパスで固定して指定する。
+# 番号を使う場合は `v4l2-ctl --list-devices` で都度確認すること。
+WEBCAM_INDEX = "/dev/v4l/by-id/usb-Lenovo_Lenovo_Performance_Camera_145081A8-video-index0"
 WEBCAM_WIDTH = 1920
 WEBCAM_HEIGHT = 1080
 
@@ -62,14 +67,14 @@ PUBLISH_HEIGHT = 720
 # 映像配信FPS
 # ============================================================
 
-IMAGE_FPS = 30.0
+IMAGE_FPS = 60.0
 
 
 # ============================================================
 # YOLO推論FPS
 # ============================================================
 
-YOLO_FPS = 10.0
+YOLO_FPS = 60.0
 
 
 # ============================================================
@@ -112,6 +117,17 @@ BBOX_OVERLAP_THRESHOLD = 0.70
 # ============================================================
 
 FPS_HISTORY_SIZE = 10
+
+
+# ============================================================
+# デバッグ計測設定
+#
+# on_camera_timer内の各ステップ処理時間を
+# N回に1回ログ出力する
+# ============================================================
+
+DEBUG_TIMING_ENABLED = False
+DEBUG_TIMING_INTERVAL = 30
 
 
 # ============================================================
@@ -566,6 +582,13 @@ class BrockMasterNode(Node):
 
 
         # ====================================================
+        # デバッグ計測用カウンタ
+        # ====================================================
+
+        self._camera_dbg_count = 0
+
+
+        # ====================================================
         # モデル
         # ====================================================
 
@@ -701,12 +724,24 @@ class BrockMasterNode(Node):
 
         # ----------------------------------------------------
         # Image Publisher
+        #
+        # rqt_image_view等のGUI表示側の描画が追いつかないと、
+        # RELIABLE QoS(デフォルト)ではACK待ちでpublish()自体が
+        # ブロックされFPS低下の原因になるため、
+        # センサーデータ向けのBEST_EFFORT QoSを使用する。
+        # 多少のフレーム取りこぼしより最新性を優先する。
         # ----------------------------------------------------
+
+        image_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
 
         self.publisher = self.create_publisher(
             Image,
             IMAGE_TOPIC,
-            10,
+            image_qos,
         )
 
 
@@ -912,6 +947,14 @@ class BrockMasterNode(Node):
     def on_camera_timer(self):
 
         # ----------------------------------------------------
+        # デバッグ計測開始
+        # ----------------------------------------------------
+
+        if DEBUG_TIMING_ENABLED:
+            t0 = time.perf_counter()
+
+
+        # ----------------------------------------------------
         # カメラ画像取得
         # ----------------------------------------------------
 
@@ -919,6 +962,10 @@ class BrockMasterNode(Node):
 
         if not ret:
             return
+
+
+        if DEBUG_TIMING_ENABLED:
+            t1 = time.perf_counter()
 
 
         # ----------------------------------------------------
@@ -939,6 +986,10 @@ class BrockMasterNode(Node):
         with self.data_lock:
 
             self.latest_frame = frame.copy()
+
+
+        if DEBUG_TIMING_ENABLED:
+            t2 = time.perf_counter()
 
 
         # ----------------------------------------------------
@@ -973,6 +1024,10 @@ class BrockMasterNode(Node):
         )
 
 
+        if DEBUG_TIMING_ENABLED:
+            t3 = time.perf_counter()
+
+
         # ----------------------------------------------------
         # FPS表示
         #
@@ -984,6 +1039,10 @@ class BrockMasterNode(Node):
             image_fps,
             self.yolo_fps_counter.get_fps(),
         )
+
+
+        if DEBUG_TIMING_ENABLED:
+            t4 = time.perf_counter()
 
 
         # ----------------------------------------------------
@@ -1000,6 +1059,10 @@ class BrockMasterNode(Node):
         )
 
 
+        if DEBUG_TIMING_ENABLED:
+            t5 = time.perf_counter()
+
+
         # ----------------------------------------------------
         # Image publish
         # ----------------------------------------------------
@@ -1007,6 +1070,38 @@ class BrockMasterNode(Node):
         self._publish_image(
             publish_frame
         )
+
+
+        # ----------------------------------------------------
+        # デバッグ計測ログ出力
+        #
+        # 毎フレーム出すとログ自体が重くなるため、
+        # DEBUG_TIMING_INTERVAL回に1回だけ出力する
+        # ----------------------------------------------------
+
+        if DEBUG_TIMING_ENABLED:
+
+            t6 = time.perf_counter()
+
+            self._camera_dbg_count += 1
+
+            if (
+                self._camera_dbg_count
+                % DEBUG_TIMING_INTERVAL
+                == 0
+            ):
+
+                self.get_logger().info(
+                    "on_camera_timer timing: "
+                    f"read={(t1 - t0) * 1000:.1f}ms "
+                    f"copy={(t2 - t1) * 1000:.1f}ms "
+                    f"draw_box={(t3 - t2) * 1000:.1f}ms "
+                    f"draw_fps={(t4 - t3) * 1000:.1f}ms "
+                    f"resize={(t5 - t4) * 1000:.1f}ms "
+                    f"publish={(t6 - t5) * 1000:.1f}ms "
+                    f"total={(t6 - t0) * 1000:.1f}ms "
+                    f"image_fps={image_fps:.1f}"
+                )
 
 
     # ========================================================
@@ -1730,9 +1825,22 @@ class BrockMasterNode(Node):
 
         # ----------------------------------------------------
         # ndarray → bytes
+        #
+        # msg.data = frame.tobytes() のように通常のsetter経由で
+        # 代入すると、rclpyが生成するメッセージクラスの検証処理が
+        # 全バイト(数百万要素)をPythonループでチェックするため、
+        # 1回あたり150〜250ms程度の大きな遅延が発生する。
+        # (実測: publish=176〜250ms → 修正後 publish=数ms)
+        #
+        # 内部属性(_data)に直接代入することでこの検証処理を
+        # バイパスする。シリアライズはバッファプロトコル経由で
+        # 行われるため、numpy配列(uint8, 1次元)でも問題なく動作する。
         # ----------------------------------------------------
 
-        msg.data = frame.tobytes()
+        msg._data = np.asarray(
+            frame,
+            dtype=np.uint8,
+        ).reshape(-1)
 
 
         # ----------------------------------------------------
