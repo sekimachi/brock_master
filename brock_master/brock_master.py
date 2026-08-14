@@ -141,8 +141,20 @@ FPS_HISTORY_SIZE = 10
 # N回に1回ログ出力する
 # ============================================================
 
-DEBUG_TIMING_ENABLED = False
+DEBUG_TIMING_ENABLED = True
 DEBUG_TIMING_INTERVAL = 30
+
+
+# ============================================================
+# 画像publish切り替え設定
+#
+# publish_call(DDS送信)のコストが原因かどうかを切り分けるため、
+# 画像のpublish自体をON/OFFできるようにする。
+# Falseにすると、画像は配信されずrqt_image_view等では見れなく
+# なるが、brocks_info(距離等のテキスト情報)は影響を受けない。
+# ============================================================
+
+ENABLE_IMAGE_PUBLISH = False
 
 
 # ============================================================
@@ -666,6 +678,11 @@ class BrockMasterNode(Node):
             f"{CAMERA_DISTANCE_OFFSET_M:.3f} m"
         )
 
+        self.get_logger().info(
+            f"Image publish enabled: "
+            f"{ENABLE_IMAGE_PUBLISH}"
+        )
+
 
     # ========================================================
     # モデル読み込み
@@ -1090,11 +1107,16 @@ class BrockMasterNode(Node):
 
         # ----------------------------------------------------
         # Image publish
+        #
+        # ENABLE_IMAGE_PUBLISH = False にすると、publish_call
+        # (DDS送信)のコストが原因かどうかを切り分けられる。
         # ----------------------------------------------------
 
-        self._publish_image(
-            publish_frame
-        )
+        if ENABLE_IMAGE_PUBLISH:
+
+            self._publish_image(
+                publish_frame
+            )
 
 
         # ----------------------------------------------------
