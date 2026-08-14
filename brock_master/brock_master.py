@@ -50,7 +50,7 @@ CONF_THRES = 0.3
 # /dev/videoNの番号はUSB抜き差しや起動順序でずれることがあるため、
 # by-id(デバイス名ベース)のパスで固定して指定する。
 # 番号を使う場合は `v4l2-ctl --list-devices` で都度確認すること。
-WEBCAM_INDEX = "/dev/v4l/by-id/usb-Lenovo_Lenovo_Performance_Camera_145081A8-video-index0"
+WEBCAM_INDEX = "/dev/video0"
 WEBCAM_WIDTH = 1920
 WEBCAM_HEIGHT = 1080
 
@@ -84,7 +84,22 @@ YOLO_FPS = 10.0
 BOX_REAL_WIDTH_M = 0.22
 BOX_REAL_HEIGHT_M = 0.30
 
-WEBCAM_FOCAL_LENGTH_PX = 791.7 * 1.5
+WEBCAM_FOCAL_LENGTH_PX = 1161.12  # 実機YOLO 2m/3m/4m/5mデータで最小二乗フィット
+
+# ------------------------------------------------------------
+# カメラ距離オフセット
+#
+# キャリブレーション時、メジャーの0点(測定基準位置)と
+# カメラのレンズ(光学中心)の位置が一致していないことで生じる
+# 系統誤差を補正するための値。
+#
+# distance = (H * focal / pixel_height) - CAMERA_DISTANCE_OFFSET_M
+#
+# 実機のYOLO検出ログ(2m, 3m, 4m, 5m地点、箱静止確認済み)から
+# 最小二乗フィットして算出。RMSE = 約0.10m (2.85%)
+# ------------------------------------------------------------
+
+CAMERA_DISTANCE_OFFSET_M = -0.2336
 
 DISTANCE_HISTORY_SIZE = 4
 
@@ -246,6 +261,9 @@ class FPSCounter:
 
 # ============================================================
 # 距離推定
+#
+# メジャーの0点とレンズ位置のズレを補正するため、
+# CAMERA_DISTANCE_OFFSET_M を減算する。
 # ============================================================
 
 def estimate_distance_from_height(pixel_height):
@@ -257,11 +275,13 @@ def estimate_distance_from_height(pixel_height):
         return 0.0
 
     distance = (
-        BOX_REAL_HEIGHT_M
-        * WEBCAM_FOCAL_LENGTH_PX
-    ) / pixel_height
+        (
+            BOX_REAL_HEIGHT_M
+            * WEBCAM_FOCAL_LENGTH_PX
+        ) / pixel_height
+    ) - CAMERA_DISTANCE_OFFSET_M
 
-    return distance
+    return max(distance, 0.0)
 
 
 # ============================================================
@@ -639,6 +659,11 @@ class BrockMasterNode(Node):
         self.get_logger().info(
             f"BBOX overlap threshold: "
             f"{BBOX_OVERLAP_THRESHOLD * 100:.0f}%"
+        )
+
+        self.get_logger().info(
+            f"Camera distance offset: "
+            f"{CAMERA_DISTANCE_OFFSET_M:.3f} m"
         )
 
 
