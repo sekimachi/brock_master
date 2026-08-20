@@ -15,6 +15,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from std_msgs.msg import Float32
+from std_msgs.msg import Bool
 
 from ultralytics import YOLO
 
@@ -29,6 +30,9 @@ IMAGE_TOPIC = "brock_Webcam_BBOX"
 INFO_TOPIC = "brocks_info"
 COLOR_TOPIC = "brock_color"
 CONF_TOPIC = "brock_conf"
+
+# ★追加：YOLO / HSV切り替え用トピック
+YOLO_SWITCH_TOPIC = "brock_YOLO"
 
 
 # ============================================================
@@ -50,7 +54,7 @@ CONF_THRES = 0.3
 # /dev/videoNの番号はUSB抜き差しや起動順序でずれることがあるため、
 # by-id(デバイス名ベース)のパスで固定して指定する。
 # 番号を使う場合は `v4l2-ctl --list-devices` で都度確認すること。
-WEBCAM_INDEX = "/dev/video0"
+WEBCAM_INDEX = "/dev/video4"
 WEBCAM_WIDTH = 1920
 WEBCAM_HEIGHT = 1080
 
@@ -128,6 +132,37 @@ BBOX_OVERLAP_THRESHOLD = 0.70
 
 
 # ============================================================
+# ★HSV認識設定
+#
+# ★YOLO_inference = True  : YOLOで認識
+# ★YOLO_inference = False : HSVで認識
+# ============================================================
+
+YOLO_inference = False
+
+# ★赤色のHSV範囲
+HSV_RED_LOW_1 = np.array([0, 80, 80], dtype=np.uint8)
+HSV_RED_HIGH_1 = np.array([10, 255, 255], dtype=np.uint8)
+HSV_RED_LOW_2 = np.array([170, 80, 80], dtype=np.uint8)
+HSV_RED_HIGH_2 = np.array([179, 255, 255], dtype=np.uint8)
+
+# ★青色のHSV範囲
+HSV_BLUE_LOW = np.array([90, 80, 50], dtype=np.uint8)
+HSV_BLUE_HIGH = np.array([140, 255, 255], dtype=np.uint8)
+
+# ★白色判定
+HSV_WHITE_S_MAX = 50
+HSV_WHITE_V_MIN = 150
+
+# ★BBOX内に占める白色画素の最低割合
+HSV_WHITE_RATIO_THRESHOLD = 0.40
+
+# ★HSVマスクのノイズ除去設定
+HSV_MORPH_KERNEL_SIZE = 5
+HSV_MIN_CONTOUR_AREA = 500
+
+
+# ============================================================
 # FPS計測設定
 # ============================================================
 
@@ -154,7 +189,7 @@ DEBUG_TIMING_INTERVAL = 30
 # なるが、brocks_info(距離等のテキスト情報)は影響を受けない。
 # ============================================================
 
-ENABLE_IMAGE_PUBLISH = False
+ENABLE_IMAGE_PUBLISH = True
 
 
 # ============================================================
@@ -683,6 +718,12 @@ class BrockMasterNode(Node):
             f"{ENABLE_IMAGE_PUBLISH}"
         )
 
+        # 現在の認識方式をログに表示
+        self.get_logger().info(
+            f"Initial recognition mode: "
+            f"{'YOLO' if YOLO_inference else 'HSV'}"
+        )
+
 
     # ========================================================
     # モデル読み込み
@@ -763,6 +804,10 @@ class BrockMasterNode(Node):
             MutuallyExclusiveCallbackGroup()
         )
 
+        self.yolo_switch_callback_group = (
+            MutuallyExclusiveCallbackGroup()
+        )
+
 
         # ----------------------------------------------------
         # Image Publisher
@@ -840,6 +885,28 @@ class BrockMasterNode(Node):
         )
 
 
+        # ★追加：brock_YOLO Subscriber
+        #
+        # True  -> YOLO
+        # False -> HSV
+        self.yolo_switch_subscription = (
+            self.create_subscription(
+                Bool,
+                YOLO_SWITCH_TOPIC,
+                self.on_brock_yolo,
+                10,
+                callback_group=(
+                    self.yolo_switch_callback_group
+                ),
+            )
+        )
+
+        # ★追加：購読開始ログ
+        self.get_logger().info(
+            f"Subscribed to {YOLO_SWITCH_TOPIC}"
+        )
+
+
         # ====================================================
         # カメラ取得タイマー
         # ====================================================
@@ -873,6 +940,50 @@ class BrockMasterNode(Node):
         self.get_logger().info(
             f"Publishing detection info on {INFO_TOPIC}"
         )
+
+    # ========================================================
+    # brock_YOLO Callback
+    #
+    # True  -> YOLO推論
+    # False -> HSV認識
+    # ========================================================
+
+    def on_brock_yolo(self, msg):
+
+        global YOLO_inference
+
+        YOLO_inference = bool(msg.data)
+
+        if YOLO_inference:
+
+            self.get_logger().info(
+                "★brock_YOLO: True -> YOLO推論に切り替え"
+            )
+
+        else:
+
+            self.get_logger().info(
+                "★brock_YOLO: False -> HSV認識に切り替え"
+            )
+
+
+        # ★モード切り替え時に距離履歴をクリア
+        #
+        # HSV → YOLO または YOLO → HSV で
+        # 過去の認識方式の距離が残らないようにする。
+        with self.data_lock:
+
+            self.distance_history.clear()
+
+
+        # ★古いBBOXを一旦消す
+        #
+        # 切り替え直後に前の方式のBBOXが残るのを防ぐ。
+        with self.data_lock:
+
+            self.latest_box_data = []
+
+            self.latest_info_lines = []
 
 
     # ========================================================
@@ -1177,9 +1288,21 @@ class BrockMasterNode(Node):
 
         start_time = time.perf_counter()
 
-        box_data_list = self._run_inference(
-            frame
-        )
+        # ★YOLO / HSV 切り替え
+        #
+        # brock_YOLO=True  -> YOLO
+        # brock_YOLO=False -> HSV
+        if YOLO_inference:
+
+            box_data_list = self._run_inference(
+                frame
+            )
+
+        else:
+
+            box_data_list = self._run_hsv_inference(
+                frame
+            )
 
         inference_time = (
             time.perf_counter()
@@ -1468,6 +1591,181 @@ class BrockMasterNode(Node):
 
 
     # ========================================================
+    # HSV推論
+    # ========================================================
+
+    def _run_hsv_inference(self, frame):
+
+        # ★BGR -> HSV
+        hsv = cv2.cvtColor(
+            frame,
+            cv2.COLOR_BGR2HSV,
+        )
+
+        # 現在選択されている色を取得
+        model_index = self.active_model_index
+        model_name = MODEL_NAMES[model_index]
+        color = model_name.split("_")[0].lower()
+
+        # 色条件からマスクを作成
+        if color == "red":
+
+            mask1 = cv2.inRange(
+                hsv,
+                HSV_RED_LOW_1,
+                HSV_RED_HIGH_1,
+            )
+
+            mask2 = cv2.inRange(
+                hsv,
+                HSV_RED_LOW_2,
+                HSV_RED_HIGH_2,
+            )
+
+            color_mask = cv2.bitwise_or(
+                mask1,
+                mask2,
+            )
+
+        elif color == "blue":
+
+            color_mask = cv2.inRange(
+                hsv,
+                HSV_BLUE_LOW,
+                HSV_BLUE_HIGH,
+            )
+
+        else:
+            return []
+
+        # 色マスクのノイズ除去
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (
+                HSV_MORPH_KERNEL_SIZE,
+                HSV_MORPH_KERNEL_SIZE,
+            ),
+        )
+
+        color_mask = cv2.morphologyEx(
+            color_mask,
+            cv2.MORPH_OPEN,
+            kernel,
+        )
+
+        color_mask = cv2.morphologyEx(
+            color_mask,
+            cv2.MORPH_CLOSE,
+            kernel,
+        )
+
+        # 色領域の輪郭を取得
+        contours, _ = cv2.findContours(
+            color_mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE,
+        )
+
+        box_data_list = []
+
+        # 白色マスクを作成
+        white_mask = cv2.inRange(
+            hsv,
+            np.array(
+                [0, 0, HSV_WHITE_V_MIN],
+                dtype=np.uint8,
+            ),
+            np.array(
+                [179, HSV_WHITE_S_MAX, 255],
+                dtype=np.uint8,
+            ),
+        )
+
+        for contour in contours:
+
+            # 小さい色領域は無視
+            contour_area = cv2.contourArea(contour)
+
+            if contour_area < HSV_MIN_CONTOUR_AREA:
+                continue
+
+            # 色領域からBBOXを作成
+            x, y, w, h = cv2.boundingRect(contour)
+
+            x1 = max(0, x)
+            y1 = max(0, y)
+            x2 = min(frame.shape[1], x + w)
+            y2 = min(frame.shape[0], y + h)
+
+            pixel_width = x2 - x1
+            pixel_height = y2 - y1
+
+            if pixel_width <= 0 or pixel_height <= 0:
+                continue
+
+            # BBOX内部の白色割合を計算
+            roi_white = white_mask[
+                y1:y2,
+                x1:x2,
+            ]
+
+            total_pixel_count = roi_white.size
+
+            if total_pixel_count <= 0:
+                continue
+
+            white_pixel_count = cv2.countNonZero(
+                roi_white
+            )
+
+            white_ratio = (
+                white_pixel_count
+                / total_pixel_count
+            )
+
+            # 白色が70%未満ならBBOXを作成しない
+            if white_ratio < HSV_WHITE_RATIO_THRESHOLD:
+                continue
+
+            # アスペクト比
+            reliable = is_aspect_ratio_reliable(
+                pixel_width,
+                pixel_height,
+            )
+
+            # 距離
+            distance = self.get_smoothed_distance(
+                pixel_height,
+                reliable,
+            )
+
+            # 中心X
+            center_x = (x1 + x2) // 2
+
+            # HSVでは白色割合をConfidenceとして使用
+            confidence = white_ratio
+
+            box_data_list.append(
+                {
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2,
+                    "pixel_height": pixel_height,
+                    "distance": distance,
+                    "center_x": center_x,
+                    "confidence": confidence,
+                    "reliable": reliable,
+                    "model_name": f"HSV_{color}",
+                    # ★白色割合を保存
+                    "white_ratio": white_ratio,
+                }
+            )
+
+        return box_data_list
+
+
+    # ========================================================
     # YOLO推論
     # ========================================================
 
@@ -1717,6 +2015,14 @@ class BrockMasterNode(Node):
             )
 
 
+            # ★HSV認識の場合は白色割合を表示
+            if "white_ratio" in box_data:
+
+                label_text += (
+                    f" 白:{box_data['white_ratio'] * 100:.1f}%"
+                )
+
+
             # ------------------------------------------------
             # アスペクト比
             # ------------------------------------------------
@@ -1776,6 +2082,15 @@ class BrockMasterNode(Node):
                 f"center_x="
                 f"{box_data['center_x']}"
             )
+
+
+            # ★HSV認識の場合は白色割合を送信
+            if "white_ratio" in box_data:
+
+                info_lines[-1] += (
+                    f",white_ratio="
+                    f"{box_data['white_ratio']:.3f}"
+                )
 
 
         return info_lines
@@ -1872,16 +2187,6 @@ class BrockMasterNode(Node):
 
         # ----------------------------------------------------
         # ndarray → bytes
-        #
-        # msg.data = frame.tobytes() のように通常のsetter経由で
-        # 代入すると、rclpyが生成するメッセージクラスの検証処理が
-        # 全バイト(数百万要素)をPythonループでチェックするため、
-        # 1回あたり150〜250ms程度の大きな遅延が発生する。
-        # (実測: publish=176〜250ms → 修正後 publish=数ms)
-        #
-        # 内部属性(_data)に直接代入することでこの検証処理を
-        # バイパスする。シリアライズはバッファプロトコル経由で
-        # 行われるため、numpy配列(uint8, 1次元)でも問題なく動作する。
         # ----------------------------------------------------
 
         msg._data = np.asarray(
