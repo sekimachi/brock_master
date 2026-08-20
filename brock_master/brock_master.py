@@ -30,8 +30,6 @@ IMAGE_TOPIC = "brock_Webcam_BBOX"
 INFO_TOPIC = "brocks_info"
 COLOR_TOPIC = "brock_color"
 CONF_TOPIC = "brock_conf"
-
-# ★追加：YOLO / HSV切り替え用トピック
 YOLO_SWITCH_TOPIC = "brock_YOLO"
 
 
@@ -54,7 +52,7 @@ CONF_THRES = 0.3
 # /dev/videoNの番号はUSB抜き差しや起動順序でずれることがあるため、
 # by-id(デバイス名ベース)のパスで固定して指定する。
 # 番号を使う場合は `v4l2-ctl --list-devices` で都度確認すること。
-WEBCAM_INDEX = "/dev/video4"
+WEBCAM_INDEX = "/dev/video0"
 WEBCAM_WIDTH = 1920
 WEBCAM_HEIGHT = 1080
 
@@ -132,32 +130,29 @@ BBOX_OVERLAP_THRESHOLD = 0.70
 
 
 # ============================================================
-# ★HSV認識設定
-#
-# ★YOLO_inference = True  : YOLOで認識
-# ★YOLO_inference = False : HSVで認識
+# HSV認識設定
 # ============================================================
 
-YOLO_inference = False
+YOLO_inference = True
 
-# ★赤色のHSV範囲
+# 赤色のHSV範囲
 HSV_RED_LOW_1 = np.array([0, 80, 80], dtype=np.uint8)
 HSV_RED_HIGH_1 = np.array([10, 255, 255], dtype=np.uint8)
 HSV_RED_LOW_2 = np.array([170, 80, 80], dtype=np.uint8)
 HSV_RED_HIGH_2 = np.array([179, 255, 255], dtype=np.uint8)
 
-# ★青色のHSV範囲
+# 青色のHSV範囲
 HSV_BLUE_LOW = np.array([90, 80, 50], dtype=np.uint8)
 HSV_BLUE_HIGH = np.array([140, 255, 255], dtype=np.uint8)
 
-# ★白色判定
+# 白色判定
 HSV_WHITE_S_MAX = 50
 HSV_WHITE_V_MIN = 150
 
-# ★BBOX内に占める白色画素の最低割合
+# BBOX内に占める白色画素の最低割合
 HSV_WHITE_RATIO_THRESHOLD = 0.40
 
-# ★HSVマスクのノイズ除去設定
+# HSVマスクのノイズ除去設定
 HSV_MORPH_KERNEL_SIZE = 5
 HSV_MIN_CONTOUR_AREA = 500
 
@@ -171,9 +166,6 @@ FPS_HISTORY_SIZE = 10
 
 # ============================================================
 # デバッグ計測設定
-#
-# on_camera_timer内の各ステップ処理時間を
-# N回に1回ログ出力する
 # ============================================================
 
 DEBUG_TIMING_ENABLED = True
@@ -245,9 +237,6 @@ MODEL_NAMES = [
 
 # ============================================================
 # 色とモデルの対応
-#
-# red_brock.pt  -> red
-# blue_brock.pt -> blue
 # ============================================================
 
 COLOR_TO_MODEL_INDEX = {
@@ -885,10 +874,10 @@ class BrockMasterNode(Node):
         )
 
 
-        # ★追加：brock_YOLO Subscriber
-        #
-        # True  -> YOLO
-        # False -> HSV
+        # ----------------------------------------------------
+        # brock_YOLO Subscriber
+        # ----------------------------------------------------  
+
         self.yolo_switch_subscription = (
             self.create_subscription(
                 Bool,
@@ -1795,7 +1784,7 @@ class BrockMasterNode(Node):
         results = model(
             frame,
             conf=self.conf_thres,
-            imgsz=480,
+            imgsz=1280,
             verbose=False,
         )
 
