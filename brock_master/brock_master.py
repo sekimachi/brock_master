@@ -54,7 +54,7 @@ CONF_THRES = 0.3
 # /dev/videoNの番号はUSB抜き差しや起動順序でずれることがあるため、
 # by-id(デバイス名ベース)のパスで固定して指定する。
 # 番号を使う場合は `v4l2-ctl --list-devices` で都度確認すること。
-WEBCAM_INDEX = "/dev/video0"
+WEBCAM_INDEX = "/dev/video4"
 WEBCAM_WIDTH = 1920
 WEBCAM_HEIGHT = 1080
 
