@@ -54,7 +54,7 @@ CONF_THRES = 0.3
 # /dev/videoNの番号はUSB抜き差しや起動順序でずれることがあるため、
 # by-id(デバイス名ベース)のパスで固定して指定する。
 # 番号を使う場合は `v4l2-ctl --list-devices` で都度確認すること。
-WEBCAM_INDEX = "/dev/video4"
+WEBCAM_INDEX = "/dev/video0"
 WEBCAM_WIDTH = 1920
 WEBCAM_HEIGHT = 1080
 
@@ -63,8 +63,8 @@ WEBCAM_HEIGHT = 1080
 # 配信用解像度
 # ============================================================
 
-PUBLISH_WIDTH = 1280
-PUBLISH_HEIGHT = 720
+PUBLISH_WIDTH = 320
+PUBLISH_HEIGHT = 180
 
 
 # ============================================================
@@ -138,7 +138,7 @@ BBOX_OVERLAP_THRESHOLD = 0.70
 # ★YOLO_inference = False : HSVで認識
 # ============================================================
 
-YOLO_inference = False
+YOLO_inference = True
 
 # ★赤色のHSV範囲
 HSV_RED_LOW_1 = np.array([0, 80, 80], dtype=np.uint8)
@@ -1856,7 +1856,7 @@ class BrockMasterNode(Node):
         results = model(
             frame,
             conf=self.conf_thres,
-            imgsz=480,
+            imgsz=640,
             verbose=False,
         )
 
