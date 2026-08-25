@@ -40,16 +40,17 @@ MODEL_FILENAMES = [
     "blue_brock.pt",
 ]
 
+# ============================================================
+# YOLO認識の信頼度閾値、高くすれば厳しくなるし、低くすればご認識が増えるよ
+# ============================================================
 CONF_THRES = 0.3
 
 
 # ============================================================
 # Webカメラ設定（推論用の解像度）
 # ============================================================
-
-# /dev/videoNの番号はUSB抜き差しや起動順序でずれることがあるため、
-# by-id(デバイス名ベース)のパスで固定して指定する。
-# 番号を使う場合は `v4l2-ctl --list-devices` で都度確認すること。
+# /dev/videoNの番号はUSB抜き差しや起動順序でずれることがある
+# `v4l2-ctl --list-devices` で都度確認すること。
 WEBCAM_INDEX = "/dev/video0"
 WEBCAM_WIDTH = 1920
 WEBCAM_HEIGHT = 1080
@@ -59,108 +60,8 @@ WEBCAM_HEIGHT = 1080
 # 配信用解像度
 # ============================================================
 
-PUBLISH_WIDTH = 640
-PUBLISH_HEIGHT = 360
-
-
-# ============================================================
-# 映像配信FPS
-# ============================================================
-
-IMAGE_FPS = 30.0
-
-
-# ============================================================
-# YOLO推論FPS
-# ============================================================
-
-YOLO_FPS = 15.0
-
-
-# ============================================================
-# 距離推定設定
-# ============================================================
-
-BOX_REAL_WIDTH_M = 0.22
-BOX_REAL_HEIGHT_M = 0.30
-
-WEBCAM_FOCAL_LENGTH_PX = 1161.12  # 実機YOLO 2m/3m/4m/5mデータで最小二乗フィット
-
-# ------------------------------------------------------------
-# カメラ距離オフセット
-#
-# キャリブレーション時、メジャーの0点(測定基準位置)と
-# カメラのレンズ(光学中心)の位置が一致していないことで生じる
-# 系統誤差を補正するための値。
-#
-# distance = (H * focal / pixel_height) - CAMERA_DISTANCE_OFFSET_M
-#
-# 実機のYOLO検出ログ(2m, 3m, 4m, 5m地点、箱静止確認済み)から
-# 最小二乗フィットして算出。RMSE = 約0.10m (2.85%)
-# ------------------------------------------------------------
-import os
-import time
-import threading
-from collections import deque
-
-import cv2
-import numpy as np
-import rclpy
-
-from rclpy.node import Node
-from rclpy.executors import MultiThreadedExecutor
-from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-
-from sensor_msgs.msg import Image
-from std_msgs.msg import String
-from std_msgs.msg import Float32
-
-from ultralytics import YOLO
-
-from .webcam_utils import LatestFrameReader
-
-
-# ============================================================
-# ROSトピック
-# ============================================================
-
-IMAGE_TOPIC = "brock_Webcam_BBOX"
-INFO_TOPIC = "brocks_info"
-COLOR_TOPIC = "brock_color"
-CONF_TOPIC = "brock_conf"
-
-
-# ============================================================
-# YOLOモデル設定
-# ============================================================
-
-MODEL_FILENAMES = [
-    "red_brock.pt",
-    "blue_brock.pt",
-]
-
-CONF_THRES = 0.3
-
-
-# ============================================================
-# Webカメラ設定（推論用の解像度）
-# ============================================================
-
-# /dev/videoNの番号はUSB抜き差しや起動順序でずれることがあるため、
-# by-id(デバイス名ベース)のパスで固定して指定する。
-# 番号を使う場合は `v4l2-ctl --list-devices` で都度確認すること。
-WEBCAM_INDEX = "/dev/video0"
-WEBCAM_WIDTH = 1920
-WEBCAM_HEIGHT = 1080
-
-
-# ============================================================
-# 配信用解像度
-# ============================================================
-
-PUBLISH_WIDTH = 640
-PUBLISH_HEIGHT = 360
+PUBLISH_WIDTH = 320
+PUBLISH_HEIGHT = 180
 
 
 # ============================================================
@@ -220,7 +121,7 @@ ASPECT_RATIO_TOLERANCE = 0.4
 #
 # 重なり面積 / 小さい方のBBOX面積
 #
-# 70%以上重なった場合、
+# 90%以上重なった場合、
 # 信頼度の低い方を削除する
 # ============================================================
 
@@ -228,35 +129,34 @@ BBOX_OVERLAP_THRESHOLD = 0.90
 
 
 # ============================================================
-# ★YOLO BBOX内部の反対色判定用HSV範囲
+# YOLO BBOX内部の反対色判定用HSV範囲
 # ============================================================
 
-# ★赤色のHSV範囲
+# 赤色のHSV範囲
 HSV_RED_LOW_1 = np.array([0, 80, 80], dtype=np.uint8)
 HSV_RED_HIGH_1 = np.array([10, 255, 255], dtype=np.uint8)
 HSV_RED_LOW_2 = np.array([170, 80, 80], dtype=np.uint8)
 HSV_RED_HIGH_2 = np.array([179, 255, 255], dtype=np.uint8)
 
-# ★青色のHSV範囲
+# 青色のHSV範囲
 HSV_BLUE_LOW = np.array([90, 80, 50], dtype=np.uint8)
 HSV_BLUE_HIGH = np.array([140, 255, 255], dtype=np.uint8)
 
 
 # ============================================================
-# ★YOLO BBOX内部の反対色判定
+# YOLO BBOX内部の反対色判定
+
+# YOLOで検出したBBOX内部に、
+# 反対色がこの割合以上含まれていたらBBOXを除外する。
+#
+# 赤モデルの場合
+#     青色が30%以上 → 除外
+#
+# 青モデルの場合
+#     赤色が30%以上 → 除外
 # ============================================================
 
-# ★YOLOで検出したBBOX内部に、
-# ★反対色がこの割合以上含まれていたらBBOXを除外する。
-#
-# ★赤モデルの場合
-# ★    青色が30%以上 → 除外
-#
-# ★青モデルの場合
-# ★    赤色が30%以上 → 除外
-
 YOLO_OPPOSITE_COLOR_RATIO_THRESHOLD = 0.30
-
 
 # ============================================================
 # FPS計測設定
@@ -404,9 +304,6 @@ class FPSCounter:
 
 # ============================================================
 # 距離推定
-#
-# メジャーの0点とレンズ位置のズレを補正するため、
-# CAMERA_DISTANCE_OFFSET_M を減算する。
 # ============================================================
 
 def estimate_distance_from_height(pixel_height):
@@ -573,7 +470,7 @@ def calculate_overlap_ratio(box1, box2):
 # ============================================================
 # BBOX重複除去
 #
-# 70%以上重なっているBBOXがあれば、
+# 90%以上重なっているBBOXがあれば、
 # 信頼度の低い方を削除する。
 # ============================================================
 
@@ -814,7 +711,7 @@ class BrockMasterNode(Node):
             f"{ENABLE_IMAGE_PUBLISH}"
         )
 
-        # ★反対色判定の閾値をログ表示
+        # 反対色判定の閾値をログ表示
         self.get_logger().info(
             f"YOLO opposite color threshold: "
             f"{YOLO_OPPOSITE_COLOR_RATIO_THRESHOLD * 100:.0f}%"
@@ -1631,7 +1528,7 @@ class BrockMasterNode(Node):
 
 
         # ----------------------------------------------------
-        # ★YOLO BBOX内部の色判定用HSV
+        # YOLO BBOX内部の色判定用HSV
         # ----------------------------------------------------
 
         hsv = cv2.cvtColor(
@@ -1639,7 +1536,7 @@ class BrockMasterNode(Node):
             cv2.COLOR_BGR2HSV,
         )
 
-        # ★赤色マスク
+        # 赤色マスク
         red_mask_1 = cv2.inRange(
             hsv,
             HSV_RED_LOW_1,
@@ -1657,7 +1554,7 @@ class BrockMasterNode(Node):
             red_mask_2,
         )
 
-        # ★青色マスク
+        # 青色マスク
         blue_mask = cv2.inRange(
             hsv,
             HSV_BLUE_LOW,
@@ -1752,24 +1649,24 @@ class BrockMasterNode(Node):
 
 
                 # =================================================
-                # ★YOLO BBOX内部の反対色判定
+                # YOLO BBOX内部の反対色判定
                 #
-                # ★赤モデル
-                # ★    BBOX内部の青色割合を計算
+                # 赤モデル
+                #     BBOX内部の青色割合を計算
                 #
-                # ★青モデル
-                # ★    BBOX内部の赤色割合を計算
+                # 青モデル
+                #     BBOX内部の赤色割合を計算
                 #
-                # ★ここで除外されたBBOXは、
-                # ★距離計算やbrocks_info送信を行わない。
+                # ここで除外されたBBOXは、
+                # 距離計算やbrocks_info送信を行わない。
                 # =================================================
 
                 if model_color == "red":
 
-                    # ★赤モデルなので青色を反対色とする
+                    # 赤モデルなので青色を反対色とする
                     opposite_mask = blue_mask
 
-                    # ★BBOX内部の青色画素数
+                    # BBOX内部の青色画素数
                     opposite_pixel_count = cv2.countNonZero(
                         opposite_mask[
                             y1:y2,
@@ -1779,10 +1676,10 @@ class BrockMasterNode(Node):
 
                 elif model_color == "blue":
 
-                    # ★青モデルなので赤色を反対色とする
+                    # 青モデルなので赤色を反対色とする
                     opposite_mask = red_mask
 
-                    # ★BBOX内部の赤色画素数
+                    # BBOX内部の赤色画素数
                     opposite_pixel_count = cv2.countNonZero(
                         opposite_mask[
                             y1:y2,
@@ -1792,25 +1689,25 @@ class BrockMasterNode(Node):
 
                 else:
 
-                    # ★未知の色の場合は反対色判定をしない
+                    # 未知の色の場合は反対色判定をしない
                     opposite_pixel_count = 0
 
 
-                # ★BBOX全体の画素数
+                # BBOX全体の画素数
                 bbox_pixel_count = (
                     pixel_width
                     * pixel_height
                 )
 
 
-                # ★反対色割合
+                # 反対色割合
                 opposite_ratio = (
                     opposite_pixel_count
                     / bbox_pixel_count
                 )
 
 
-                # ★反対色が30%以上ならBBOXを除外
+                # 反対色が30%以上ならBBOXを除外
                 if (
                     opposite_ratio
                     >= YOLO_OPPOSITE_COLOR_RATIO_THRESHOLD
@@ -1876,7 +1773,7 @@ class BrockMasterNode(Node):
                         "reliable": reliable,
                         "model_name": model_name,
 
-                        # ★YOLO時の反対色割合を保存
+                        # YOLO時の反対色割合を保存
                         "opposite_ratio": opposite_ratio,
                     }
                 )
