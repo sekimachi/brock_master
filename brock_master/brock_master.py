@@ -2024,36 +2024,42 @@ class BrockMasterNode(Node):
                     opposite_ratio = 0.0
 
 
-                # ★自分の色が不足している場合は除外
-                if (
-                    own_ratio
-                    < YOLO_OWN_COLOR_MIN_RATIO
-                ):
+                # ★2026-08-26: データセット改良によりモデル自体の
+                # ★色識別精度が上がったため、赤/青を排他するこの
+                # ★2つの除外判定をいったんコメントアウト(無効化)する。
+                # ★own_ratio/opposite_ratioの計算自体は表示用に残す。
+                # ★再度有効化する場合はコメントを外すだけでよい。
 
-                    self.get_logger().debug(
-                        f"YOLO BBOX rejected(own不足): "
-                        f"model={model_color}, "
-                        f"own_ratio="
-                        f"{own_ratio * 100:.1f}%"
-                    )
-
-                    continue
-
-
-                # ★反対色が混入している場合は除外
-                if (
-                    opposite_ratio
-                    >= YOLO_OPPOSITE_COLOR_RATIO_THRESHOLD
-                ):
-
-                    self.get_logger().debug(
-                        f"YOLO BBOX rejected(反対色混入): "
-                        f"model={model_color}, "
-                        f"opposite_ratio="
-                        f"{opposite_ratio * 100:.1f}%"
-                    )
-
-                    continue
+                # # ★自分の色が不足している場合は除外
+                # if (
+                #     own_ratio
+                #     < YOLO_OWN_COLOR_MIN_RATIO
+                # ):
+                #
+                #     self.get_logger().debug(
+                #         f"YOLO BBOX rejected(own不足): "
+                #         f"model={model_color}, "
+                #         f"own_ratio="
+                #         f"{own_ratio * 100:.1f}%"
+                #     )
+                #
+                #     continue
+                #
+                #
+                # # ★反対色が混入している場合は除外
+                # if (
+                #     opposite_ratio
+                #     >= YOLO_OPPOSITE_COLOR_RATIO_THRESHOLD
+                # ):
+                #
+                #     self.get_logger().debug(
+                #         f"YOLO BBOX rejected(反対色混入): "
+                #         f"model={model_color}, "
+                #         f"opposite_ratio="
+                #         f"{opposite_ratio * 100:.1f}%"
+                #     )
+                #
+                #     continue
 
 
                 # --------------------------------------------
